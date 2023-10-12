@@ -1,0 +1,120 @@
+$rename = Read-Host -Prompt 'Input a new name for this machine'
+$loricuspass = Read-Host -Prompt 'Enter password for loricusadmin'
+
+New-Item -ItemType Directory -Path "C:\loricus\"
+
+net user loricusadmin $loricuspass 
+Rename-Computer -NewName $rename
+Set-TimeZone -Id "Eastern Standard Time"
+
+<# Edit Power Plan #>
+powercfg /change /standby-timeout-ac 0
+powercfg -h off
+powershell Set-NetIPInterface -InterfaceAlias "Ethernet" -InterfaceMetric 10
+powercfg /change /monitor-timeout-ac 30
+powercfg.exe -x -disk-timeout-ac 0
+powercfg.exe -x -disk-timeout-dc 0
+Write-host "Power Options Configured"
+
+<# Disable Fast Boot #>
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d "0" /f
+Write-host "Fast Boot Off"
+
+<# Disable UAC #>
+Set-ItemProperty -Path REGISTRY::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Policies\System -Name ConsentPromptBehaviorAdmin -Value 0
+Write-host "UAC Disabled"
+
+<# Turn Wake On Lan On In BIOS For Dell #>
+set-executionpolicy -executionpolicy Bypass -Force
+if (-not ((Get-WmiObject win32_bios).Manufacturer -like "Dell*")){
+Write-host "Command must be run against a Dell computer" exit 1
+}
+if (-not (Get-Module -ListAvailable -Name DellSMBios)){
+Install-Module -Name DellBiosProvider -Force
+}
+Import-Module DellBiosProvider
+if(Test-Path dellsmbios:\PowerManagement\WakeOnLan){
+Set-Item -Path dellsmbios:\PowerManagement\WakeOnLan LANOnly
+}
+else{
+Write-host "Computer does not support WakeOnLAN"
+}
+if(Test-Path dellsmbios:\PowerManagement\DeepSleepCtrl){
+Set-Item -Path dellsmbios:\PowerManagement\DeepSleepCtrl Disabled
+}
+else{
+Write-host "Computer does not support DeepSleep"
+}
+Write-host "BIOS WOL Enabled"
+
+<# Disable Change Network Adapter Properties #>
+$adapters = Get-NetAdapter | Get-NetAdapterPowerManagement
+foreach ($adapter in $adapters)
+{
+$adapter.AllowComputerToTurnOffDevice = 'Disabled'
+$adapter | Set-NetAdapterPowerManagement -DeviceSleepOnDisconnect Disabled -SelectiveSuspend Disabled -WakeOnMagicPacket Enabled
+}
+Write-host "Network Options Set"
+
+<#Wait For Connection To Restore #>
+do {
+  Write-Host "waiting..."
+  sleep 3      
+  function PingMachine {
+   $pingresult = Get-CimInstance win32_pingstatus -f "address='8.8.8.8'"
+   if($pingresult.statuscode -eq 0) {$true} else {$false}
+}
+} until(PingMachine = "True")
+Start-Sleep -Seconds 5
+Write-host "Connection Restored"
+
+<# Enable Bitlocker Save Key To C Loricus #>
+$BLinfo = Get-Bitlockervolume
+if($blinfo.ProtectionStatus -eq 'On' -and $blinfo.EncryptionPercentage -eq '100'){
+    write-output "'$env:computername - '$($blinfo.MountPoint)' is encrypted"
+    (Get-BitLockerVolume -MountPoint C).KeyProtector.recoverypassword > c:\loricus\bitlockerkey.txt
+    Write-host "Bitlocker already enabled, Key is in c:\loricus"
+}else {
+Enable-BitLocker -MountPoint "C:" -RecoveryPasswordProtector
+(Get-BitLockerVolume -MountPoint C).KeyProtector.recoverypassword > c:\loricus\bitlockerkey.txt
+Write-host "Bitlocker enabled, key is in c:\loricus"
+}
+
+<# Install Ninite #>
+$Url = "https://ninite.com/.net4.8-7zip-adoptjava8-adoptjavax11-adoptjavax8-air-chrome-firefox-silverlight/ninite.exe"
+$SavePath = "c:\loricus\ninite.exe"
+$WebClient = New-Object System.Net.WebClient
+$downloadResults = $WebClient.DownloadFile($Url,$SavePath)
+$runProcessResults = Start-Process -Filepath "$SavePath" 
+
+<# Install Syncro #>
+$Url = "https://rmm.syncromsp.com/dl/rs/djEtMjY4MDM5NTUtMTY3OTE3MTAxNy00OTY4OC0yNTg0MDI0"
+$SavePath = "c:\loricus\SyncroSetup.exe"
+$WebClient = New-Object System.Net.WebClient
+$downloadResults = $WebClient.DownloadFile($Url,$SavePath)
+$FileArguments = "--console --customerid 922189 --folderid 2584024"
+$runProcessResults = Start-Process -Filepath "$SavePath" -ArgumentList "$FileArguments"
+
+<# Install Webroot WORKSTATION #>
+$Url = "https://downbox.webrootanywhere.com/wsasmeexe/B77B-PAXE-6E52-D0EE-4AE4.exe"
+$SavePath = "c:\loricus\Webroot.exe"
+$WebClient = New-Object System.Net.WebClient
+$downloadResults = $WebClient.DownloadFile($Url,$SavePath)
+$FileArguments = "/key=B77B-PAXE-6E52-D0EE-4AE4 /silent"
+$runProcessResults = Start-Process -Filepath "$SavePath" -ArgumentList "$FileArguments"
+
+<# Install SSL VPN From Watchguard #>
+$Url = "https://cdn.watchguard.com/SoftwareCenter/Files/MUVPN_SSL/12_7_2/WG-MVPN-SSL_12_7_2.exe"
+$SavePath = "c:\loricus\SSLVPN.exe"
+$WebClient = New-Object System.Net.WebClient
+$downloadResults = $WebClient.DownloadFile($Url,$SavePath)
+$FileArguments = "/silent"
+$runProcessResults = Start-Process -Filepath "$SavePath" -ArgumentList "$FileArguments"
+
+<# Windows Updates #>
+Install-Module PSWindowsUpdate -force
+Get-WindowsUpdate -AcceptAll -Install -ignoreReboot
+
+Start-Process -FilePath "C:\Program Files\WindowsApps\DellInc.DellSupportAssistforPCs_3.13.7.0_x64__htrsf667h5kn2\Win32\SupportAssistAppWire.exe" -ArgumentList "/UpdateServiceStart", "/StartScan", "/Quiet" -Wait
+
+exit
